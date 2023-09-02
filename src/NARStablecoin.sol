@@ -10,7 +10,7 @@ contract NARStablecoin is ERC20Burnable, Ownable {
     error NAR_notEnoughBalance();
     error NAR_addressInvalid();
 
-    constructor() ERC20("NINAR", "NAR") Ownable(0x2ae5013487cf7aa6e2000fe1881dD7D295f34E85){}
+    constructor() ERC20("NINAR", "NAR") Ownable(msg.sender) {}
 
     function burn(uint256 _amount) public override onlyOwner {
         if (_amount <= 0) {

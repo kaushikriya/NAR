@@ -23,22 +23,28 @@
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {NARStablecoin} from './NARStablecoin.sol';
-
-error NAR_tokenAndPriceFeedLengthShouldBeSame();
-
-error NAR_mustBeMoreThanZero();
-
-error NAR_tokenIsNotAllowed();
-
-error NAR_transferFailed();
+import {NARStablecoin} from "./NARStablecoin.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 pragma solidity ^0.8.13;
 
-contract NAREngine is ReentrancyGuard {
+contract NARStablecoinEngine is ReentrancyGuard {
+    error NAR_tokenAndPriceFeedLengthShouldBeSame();
+    error NAR_mustBeMoreThanZero();
+    error NAR_tokenIsNotAllowed();
+    error NAR_transferFailed();
+    error NAR_breaksHealthFactor(uint256);
+    error NAR_mintFailed();
+
     mapping(address token => address priceFeed) s_tokenToPriceFeed;
 
     mapping(address user => mapping(address token => uint256 amount)) s_userToDepositedCollateral;
+
+    mapping(address user => uint256 amount) s_mintedNAR;
+
+    address[] s_tokens;
+
+    uint256 immutable i_collateralThreshold = 60;
 
     NARStablecoin private immutable i_NAR;
 
@@ -65,6 +71,7 @@ contract NAREngine is ReentrancyGuard {
         }
         for (uint256 i = 0; i < tokenAddresses.length; i++) {
             s_tokenToPriceFeed[tokenAddresses[i]] = priceFeedAddresses[i];
+            s_tokens.push(tokenAddresses[i]);
         }
     }
 
@@ -84,11 +91,47 @@ contract NAREngine is ReentrancyGuard {
         }
     }
 
+    function mintNAR(uint256 amount) external nonReentrant isMoreThanZero(amount) {
+        s_mintedNAR[msg.sender] += amount;
+        checkAndApproveHealthFactor(msg.sender);
+        bool success = i_NAR.mint(msg.sender, amount);
+        if (!success) {
+            revert NAR_mintFailed();
+        }
+    }
+
     function redeemCollateral() external {}
 
     function redeemCollateralForNAR() external {}
 
     function liquidate() external {}
 
-    function getHealthFactor() external {}
+    function getHealthFactor(address user, uint256 userCollateral) internal view returns (uint256) {
+        uint256 mintedNAR = s_mintedNAR[user];
+        uint256 collateralAdjustedForThreshold = userCollateral * i_collateralThreshold / 100;
+        return collateralAdjustedForThreshold * 1e18 / mintedNAR;
+    }
+
+    function checkAndApproveHealthFactor(address user) internal view {
+        uint256 userCollateralInUSD = getUserCollateralInformation(user);
+        uint256 healthFactor = getHealthFactor(user, userCollateralInUSD);
+        if (healthFactor <= 1) {
+            revert NAR_breaksHealthFactor(healthFactor);
+        }
+    }
+
+    function getUserCollateralInformation(address user) internal view returns (uint256 totalBalanceInUSD) {
+        for (uint256 i = 0; i < s_tokens.length; i++) {
+            address tokenAddress = s_tokens[i];
+            uint256 balance = s_userToDepositedCollateral[user][tokenAddress];
+            totalBalanceInUSD += getBalanceInUSD(balance, s_tokenToPriceFeed[tokenAddress]);
+        }
+        return totalBalanceInUSD;
+    }
+
+    function getBalanceInUSD(uint256 amount, address pricefeed) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(pricefeed);
+        (, int256 answer,,,) = priceFeed.latestRoundData();
+        return ((uint256(answer) * 1e10) * amount) / 1e18;
+    }
 }
