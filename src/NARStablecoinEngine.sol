@@ -189,6 +189,9 @@ contract NARStablecoinEngine is ReentrancyGuard {
         uint256 mintedNAR = s_mintedNAR[user];
         uint256 userCollateral = _getUserCollateralInformation(user);
         uint256 collateralAdjustedForThreshold = userCollateral * LIQUIDATION_THRESHOLD / 100;
+        if(mintedNAR == 0){
+            return type(uint256).max;    //any number greater than 1 should do
+        }
         return collateralAdjustedForThreshold * 1e18 / mintedNAR;
     }
 
@@ -212,8 +215,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
         address priceFeedAddress = s_tokenToPriceFeed[token];
         AggregatorV3Interface priceFeed = AggregatorV3Interface(priceFeedAddress);
         (, int256 answer,,,) = priceFeed.latestRoundData();
-        uint256 tokenAmount = amount / uint256(answer) * 10e10;
-        return tokenAmount * 10e18;
+        return ((amount * 1e18) / (uint256(answer) * 1e10));
     }
 
     function _burnNAR(uint256 amount, address from) private {
@@ -226,9 +228,9 @@ contract NARStablecoinEngine is ReentrancyGuard {
     }
 
     function _mintNAR(uint256 amount, address to) private {
-        s_mintedNAR[msg.sender] += amount;
-        checkHealthFactorIsBroken(msg.sender);
-        bool success = i_NAR.mint(msg.sender, amount);
+        s_mintedNAR[to] += amount;
+        checkHealthFactorIsBroken(to);
+        bool success = i_NAR.mint(to, amount);
         if (!success) {
             revert NAR_mintFailed();
         }
@@ -281,5 +283,9 @@ contract NARStablecoinEngine is ReentrancyGuard {
 
     function getCollateralTokenPriceFeed(address token) external view returns (address) {
         return s_tokenToPriceFeed[token];
+    }
+
+    function getUserBalance(address user) external view returns (uint256) {
+        return s_mintedNAR[user];
     }
 }
