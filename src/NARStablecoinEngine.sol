@@ -2,6 +2,7 @@
 
 pragma solidity ^0.8.13;
 
+import {console2} from "forge-std/console2.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {NARStablecoin} from "./NARStablecoin.sol";
@@ -43,13 +44,14 @@ contract NARStablecoinEngine is ReentrancyGuard {
     address[] s_tokens;
 
     uint256 constant LIQUIDATION_THRESHOLD = 60;
-    uint256 constant MIN_HEALTH_FACTOR = 60;
+    uint256 constant MIN_HEALTH_FACTOR = 1e18;
     uint256 constant LIQUIDATION_BONUS = 10;
 
     // events
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
     event CollateralRedeemed(address indexed user, address indexed token, uint256 indexed amount);
     event UserLiquidated(address indexed user, uint256 amount);
+    event UserMintedNAR(address indexed user, uint256 indexed amount);
 
     // modifiers
     modifier tokenIsAllowed(address token) {
@@ -137,9 +139,9 @@ contract NARStablecoinEngine is ReentrancyGuard {
     @param amount: Amount of collateral to redeem
     @notice this function will withdraw collateral in the specified token and burn the NAR token
      */
-    function redeemCollateralForNAR(address token, uint256 amount) public {
-        _burnNAR(amount, msg.sender);
-        _redeemCollateral(amount, token, msg.sender, msg.sender);
+    function redeemCollateralForNAR(address token, uint256 burnTokenAmount, uint256 collateralAmount) public {
+        _burnNAR(burnTokenAmount, msg.sender, msg.sender);
+        _redeemCollateral(collateralAmount, token, msg.sender, msg.sender);
         checkHealthFactorIsBroken(msg.sender);
     }
 
@@ -148,7 +150,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
     @notice This function will burn the specified amount of NAR token for the user
      */
     function burnNAR(uint256 amount) public {
-        _burnNAR(amount, msg.sender);
+        _burnNAR(amount, msg.sender, msg.sender);
         checkHealthFactorIsBroken(msg.sender);
     }
 
@@ -167,7 +169,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
         uint256 debtTokenToBeRecovered = _getTokenAmountFromUSD(amount, token);
         uint256 liquidationBonus = (debtTokenToBeRecovered * LIQUIDATION_BONUS) / 100;
         _redeemCollateral(debtTokenToBeRecovered + liquidationBonus, token, user, msg.sender);
-        _burnNAR(amount, user);
+        _burnNAR(amount, user, msg.sender);
         uint256 endingHealthFactor = _getHealthFactor(user);
         emit UserLiquidated(user, amount);
         if (endingHealthFactor <= startingHealthFactor) {
@@ -180,7 +182,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
 
     function checkHealthFactorIsBroken(address user) internal view {
         uint256 healthFactor = _getHealthFactor(user);
-        if (healthFactor <= 1) {
+        if (healthFactor <= MIN_HEALTH_FACTOR) {
             revert NAR_breaksHealthFactor(healthFactor);
         }
     }
@@ -188,11 +190,11 @@ contract NARStablecoinEngine is ReentrancyGuard {
     function _getHealthFactor(address user) private view returns (uint256) {
         uint256 mintedNAR = s_mintedNAR[user];
         uint256 userCollateral = _getUserCollateralInformation(user);
-        uint256 collateralAdjustedForThreshold = userCollateral * LIQUIDATION_THRESHOLD / 100;
-        if(mintedNAR == 0){
-            return type(uint256).max;    //any number greater than 1 should do
+        uint256 collateralAdjustedForThreshold = (userCollateral * LIQUIDATION_THRESHOLD) / 100;
+        if (mintedNAR == 0) {
+            return type(uint256).max; //any number greater than 1 should do
         }
-        return collateralAdjustedForThreshold * 1e18 / mintedNAR;
+        return (collateralAdjustedForThreshold * 1e18) / mintedNAR;
     }
 
     function _getUserCollateralInformation(address user) private view returns (uint256 totalBalanceInUSD) {
@@ -218,8 +220,8 @@ contract NARStablecoinEngine is ReentrancyGuard {
         return ((amount * 1e18) / (uint256(answer) * 1e10));
     }
 
-    function _burnNAR(uint256 amount, address from) private {
-        s_mintedNAR[from] -= amount;
+    function _burnNAR(uint256 amount, address from, address onBehalfOf) private {
+        s_mintedNAR[onBehalfOf] -= amount;
         bool success = i_NAR.transferFrom(from, address(this), amount);
         if (!success) {
             revert NAR_transferFailed();
@@ -230,6 +232,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
     function _mintNAR(uint256 amount, address to) private {
         s_mintedNAR[to] += amount;
         checkHealthFactorIsBroken(to);
+        emit UserMintedNAR(to, amount);
         bool success = i_NAR.mint(to, amount);
         if (!success) {
             revert NAR_mintFailed();

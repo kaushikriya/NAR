@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 
 import {ERC20Burnable, ERC20} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {console2} from "forge-std/console2.sol";
 
 contract NARStablecoin is ERC20Burnable, Ownable {
     error NAR_mustBeMoreThanZero();
@@ -18,7 +19,7 @@ contract NARStablecoin is ERC20Burnable, Ownable {
         }
         uint256 balance = balanceOf(msg.sender);
 
-        if (balance <= _amount) {
+        if (balance < _amount) {
             revert NAR_notEnoughBalance();
         }
 
@@ -32,7 +33,6 @@ contract NARStablecoin is ERC20Burnable, Ownable {
         if (_amount <= 0) {
             revert NAR_mustBeMoreThanZero();
         }
-
         _mint(_to, _amount);
         return true;
     }
