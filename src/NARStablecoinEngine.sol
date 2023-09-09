@@ -50,8 +50,9 @@ contract NARStablecoinEngine is ReentrancyGuard {
     // events
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
     event CollateralRedeemed(address indexed user, address indexed token, uint256 indexed amount);
-    event UserLiquidated(address indexed user, uint256 amount);
+    event UserLiquidated(address indexed user, uint256 indexed amount);
     event UserMintedNAR(address indexed user, uint256 indexed amount);
+    event UserBurnedNAR(address indexed user, uint256 indexed amount);
 
     // modifiers
     modifier isTokenAllowed(address token) {
@@ -103,12 +104,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
         isMoreThanZero(amount)
         nonReentrant
     {
-        s_userToDepositedCollateral[msg.sender][tokenAddress] += amount;
-        emit CollateralDeposited(msg.sender, tokenAddress, amount);
-        bool success = IERC20(tokenAddress).transferFrom(msg.sender, address(this), amount);
-        if (!success) {
-            revert NAR_transferFailed();
-        }
+        _depositCollateral(tokenAddress, amount);
     }
 
     /*
@@ -223,6 +219,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
 
     function _burnNAR(uint256 amount, address onBehalfOf, address from) private {
         s_mintedNAR[onBehalfOf] -= amount;
+        emit UserBurnedNAR(onBehalfOf,amount);
         bool success = i_NAR.transferFrom(from, address(this), amount);
         if (!success) {
             revert NAR_transferFailed();
@@ -243,12 +240,21 @@ contract NARStablecoinEngine is ReentrancyGuard {
     function _redeemCollateral(uint256 amount, address token, address from, address to) private {
         s_userToDepositedCollateral[from][token] -= amount;
         // simulating health factor before the transaction is expensive so we will not follow CEI here.
+        emit CollateralRedeemed(to, token, amount);
         bool success = IERC20(token).transfer(payable(to), amount);
         if (!success) {
             revert NAR_transferFailed();
         }
-        emit CollateralRedeemed(to, token, amount);
         checkHealthFactorIsBroken(from);
+    }
+
+    function _depositCollateral(address token, uint256 amount) internal {
+        s_userToDepositedCollateral[msg.sender][token] += amount;
+        emit CollateralDeposited(msg.sender, token, amount);
+        bool success = IERC20(token).transferFrom(msg.sender, address(this), amount);
+        if (!success) {
+            revert NAR_transferFailed();
+        }
     }
 
     // external view and pure functions
