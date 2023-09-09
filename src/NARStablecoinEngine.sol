@@ -54,7 +54,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
     event UserMintedNAR(address indexed user, uint256 indexed amount);
 
     // modifiers
-    modifier tokenIsAllowed(address token) {
+    modifier isTokenAllowed(address token) {
         if (s_tokenToPriceFeed[token] == address(0)) {
             revert NAR_tokenIsNotAllowed();
         }
@@ -99,7 +99,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
     */
     function depositCollateral(address tokenAddress, uint256 amount)
         public
-        tokenIsAllowed(tokenAddress)
+        isTokenAllowed(tokenAddress)
         isMoreThanZero(amount)
         nonReentrant
     {
@@ -127,7 +127,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
     function redeemCollateral(address token, uint256 amount)
         public
         isMoreThanZero(amount)
-        tokenIsAllowed(token)
+        isTokenAllowed(token)
         nonReentrant
     {
         _redeemCollateral(amount, token, msg.sender, msg.sender);
@@ -161,15 +161,16 @@ contract NARStablecoinEngine is ReentrancyGuard {
     @notice This function liquidates the user for the specified amount and token. The
     user can be partially liquidated if it improves the user's health factor to be valid.
      */
-    function liquidate(address user, uint256 amount, address token) public {
+    function liquidate(address user, uint256 amount, address token) public isMoreThanZero(amount) isTokenAllowed(token) {
         uint256 startingHealthFactor = _getHealthFactor(user);
         if (startingHealthFactor > MIN_HEALTH_FACTOR) {
             revert NAR_healthFactorIsValid(user, startingHealthFactor);
         }
         uint256 debtTokenToBeRecovered = _getTokenAmountFromUSD(amount, token);
         uint256 liquidationBonus = (debtTokenToBeRecovered * LIQUIDATION_BONUS) / 100;
+        console2.log('liquidation bonus',liquidationBonus, debtTokenToBeRecovered);
+         _burnNAR(amount, user, msg.sender);
         _redeemCollateral(debtTokenToBeRecovered + liquidationBonus, token, user, msg.sender);
-        _burnNAR(amount, user, msg.sender);
         uint256 endingHealthFactor = _getHealthFactor(user);
         emit UserLiquidated(user, amount);
         if (endingHealthFactor <= startingHealthFactor) {
@@ -217,10 +218,10 @@ contract NARStablecoinEngine is ReentrancyGuard {
         address priceFeedAddress = s_tokenToPriceFeed[token];
         AggregatorV3Interface priceFeed = AggregatorV3Interface(priceFeedAddress);
         (, int256 answer,,,) = priceFeed.latestRoundData();
-        return ((amount * 1e18) / (uint256(answer) * 1e10));
+        return (amount * 1e18 / (uint256(answer) * 1e10));
     }
 
-    function _burnNAR(uint256 amount, address from, address onBehalfOf) private {
+    function _burnNAR(uint256 amount, address onBehalfOf, address from) private {
         s_mintedNAR[onBehalfOf] -= amount;
         bool success = i_NAR.transferFrom(from, address(this), amount);
         if (!success) {
@@ -239,7 +240,7 @@ contract NARStablecoinEngine is ReentrancyGuard {
         }
     }
 
-    function _redeemCollateral(uint256 amount, address token, address to, address from) private {
+    function _redeemCollateral(uint256 amount, address token, address from, address to) private {
         s_userToDepositedCollateral[from][token] -= amount;
         // simulating health factor before the transaction is expensive so we will not follow CEI here.
         bool success = IERC20(token).transfer(payable(to), amount);

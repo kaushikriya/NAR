@@ -25,10 +25,12 @@ contract NARStablecoinEngineTest is Test {
 
     uint256 constant STARTING_USER_BALANCE = 100 ether;
 
-    uint256 public constant collateralAmount = 10 ether;
     address USER = makeAddr("user");
     ERC20Mock fakeToken;
     address fakeTokenAddress;
+    address LIQUIDATOR;
+    uint256 amountToMint = 5000e18; // equivalent to 6000$
+    uint256 public constant collateralAmount = 10 ether;
 
     function setUp() public {
         fakeToken = new ERC20Mock('FKE','FKE', msg.sender, 1000e18);
@@ -39,6 +41,9 @@ contract NARStablecoinEngineTest is Test {
         vm.deal(USER, 100 ether);
         ERC20Mock(weth).mint(USER, STARTING_USER_BALANCE);
         ERC20Mock(wbtc).mint(USER, STARTING_USER_BALANCE);
+        LIQUIDATOR= makeAddr('liquidator');
+        vm.deal(LIQUIDATOR, 100 ether);
+        ERC20Mock(weth).mint(LIQUIDATOR, STARTING_USER_BALANCE);
     }
 
     modifier depositCollateral() {
@@ -49,10 +54,10 @@ contract NARStablecoinEngineTest is Test {
         _;
     }
 
-     modifier depositAndMintNAR(){
-        vm.startPrank(USER);
+     modifier depositAndMintNAR(address _to){
+        vm.startPrank(_to);
         ERC20Mock(weth).approve(address(narcEngine), collateralAmount);
-        narcEngine.depositCollateralAndMintNAR(weth, collateralAmount, 5000e18);
+        narcEngine.depositCollateralAndMintNAR(weth, collateralAmount, amountToMint);
         vm.stopPrank();
         _;
     }
@@ -191,7 +196,7 @@ contract NARStablecoinEngineTest is Test {
         assertEq(userStartingBalanceInUSD - userEndingBalanceInUSD, 2000e18);
     }
 
-    function testRedeemCollateralAndBurnNAR() external depositAndMintNAR {
+    function testRedeemCollateralAndBurnNAR() external depositAndMintNAR(USER) {
         vm.startPrank(USER);
         narc.approve(address(narcEngine), 2000e18);
         ERC20Mock(weth).approve(address(narcEngine), 3000e18);
@@ -219,7 +224,7 @@ contract NARStablecoinEngineTest is Test {
         assertEq(expectedHealthFactor, actualHealthFactor);
     }
 
-    function testHealthFactorBelowZero() external depositAndMintNAR {
+    function testHealthFactorBelowZero() external depositAndMintNAR(USER) {
         MockV3Aggregator(ethUsdPriceFeed).updateAnswer(500e8);
         vm.startPrank(USER);
         uint256 userHealthFactor= narcEngine.getHealthFactor(USER);
@@ -235,7 +240,7 @@ contract NARStablecoinEngineTest is Test {
 
     // Tests for burn NAR
 
-    function testBurnNAR() external depositAndMintNAR {
+    function testBurnNAR() external depositAndMintNAR(USER) {
         uint256 tokenBurnAmount= 2 ether;
         uint256 userStartingBalance= narcEngine.getUserBalance(USER);
         vm.startPrank(USER);
@@ -246,7 +251,7 @@ contract NARStablecoinEngineTest is Test {
         assertEq(userStartingBalance, userEndingBalance + tokenBurnAmount);
     }
 
-    function testBurnNARRevertIfAmountIsZero() external depositAndMintNAR{
+    function testBurnNARRevertIfAmountIsZero() external depositAndMintNAR(USER) {
         vm.startPrank(USER);
         narc.approve(address(narcEngine), 10 ether);
         vm.expectRevert(NARStablecoinEngine.NAR_mustBeMoreThanZero.selector);
@@ -261,6 +266,101 @@ contract NARStablecoinEngineTest is Test {
         narcEngine.burnNAR(1 ether);
         vm.stopPrank();
     }
+
+    // test for liquidation
+    function testShouldNotLiquidateHealthyUser() external depositAndMintNAR(USER) {
+        vm.startPrank(LIQUIDATOR);
+        vm.expectRevert(abi.encodeWithSelector(NARStablecoinEngine.NAR_healthFactorIsValid.selector, address(USER), 24e17));
+        narcEngine.liquidate(USER, 100e18, weth);
+        vm.stopPrank();
+    }
+
+     function testShouldNotLiquidateForInvalidToken() external {
+        vm.startPrank(LIQUIDATOR);
+        vm.expectRevert(NARStablecoinEngine.NAR_tokenIsNotAllowed.selector);
+        narcEngine.liquidate(USER, 100e18, fakeTokenAddress);
+        vm.stopPrank();
+    }
+
+     function testShouldNotLiquidateIfAmountZero() external {
+        vm.startPrank(LIQUIDATOR);
+        vm.expectRevert(NARStablecoinEngine.NAR_mustBeMoreThanZero.selector);
+        narcEngine.liquidate(USER, 0, weth);
+        vm.stopPrank();
+    }
+
+    function testShouldLiquidateUser() external depositAndMintNAR(USER) depositAndMintNAR(LIQUIDATOR) {
+        vm.startPrank(LIQUIDATOR);
+
+        // liquidator approves to burn token and weth to transfer collateral
+        narc.approve(address(narcEngine), amountToMint);
+        ERC20Mock(weth).approve(address(narcEngine), 50 ether);
+        narcEngine.depositCollateral(weth, 50 ether);
+
+        // prices dip
+        MockV3Aggregator(ethUsdPriceFeed).updateAnswer(800e8);
+
+        // liquidation and assertion
+        uint256 userStartingHealthFactor= narcEngine.getHealthFactor(USER); //96e16
+        assertEq(userStartingHealthFactor, 96e16);
+        narcEngine.liquidate(USER,amountToMint,weth); // paying off the whole debt;
+        uint256 userEndingHealthFactor= narcEngine.getHealthFactor(USER);
+        assertEq(userEndingHealthFactor, type(uint256).max );
+        uint256 userEndingCollateralValue= narcEngine.getAccountCollateralValue(USER);
+        // debt paid off for 5000/800  = 6.25 ether
+        // liquidation bonus for liquidator 6.25 * 0.1 = 0.625 
+        // total ether deducted from collateral = 6.875
+        // remaining collateral = 10 ether * 800 - 6.875 * 800 = 2500$
+        assertEq( userEndingCollateralValue, 2500e18);
+        vm.stopPrank();
+    }
+
+     function testShouldPartiallyLiquidateUser() external depositAndMintNAR(USER) depositAndMintNAR(LIQUIDATOR) {
+        vm.startPrank(LIQUIDATOR);
+
+        // liquidator approves to burn token and weth to transfer collateral
+        narc.approve(address(narcEngine), amountToMint);
+        ERC20Mock(weth).approve(address(narcEngine), 50 ether);
+        narcEngine.depositCollateral(weth, 50 ether);
+
+        // prices dip
+        MockV3Aggregator(ethUsdPriceFeed).updateAnswer(800e8);
+
+        // liquidation and assertion
+        uint256 userStartingHealthFactor= narcEngine.getHealthFactor(USER); //96e16
+        assertEq(userStartingHealthFactor, 96e16);
+        narcEngine.liquidate(USER,1000e18,weth); // paying off the whole debt;
+        uint256 userEndingHealthFactor= narcEngine.getHealthFactor(USER);
+        assertEq(userEndingHealthFactor, 1035e15 );
+        uint256 userEndingCollateralValue= narcEngine.getAccountCollateralValue(USER);
+        // debt paid off for 1000/800  = 1.25 ether
+        // liquidation bonus for liquidator 1.25 * 0.1 = 0.125 
+        // total ether deducted from collateral = 1.375
+        // remaining collateral = 10 ether * 800 - 6.875 * 800 = 6900$
+        assertEq( userEndingCollateralValue, 6900e18);
+        vm.stopPrank();
+    }
+
+     function testShouldRevertIfLiquidatorHealthFactorBroken() external depositAndMintNAR(USER) depositAndMintNAR(LIQUIDATOR) {
+        vm.startPrank(LIQUIDATOR);
+
+        // liquidator approves to burn token and weth to transfer collateral
+        narc.approve(address(narcEngine), amountToMint);
+
+        // prices dip
+        MockV3Aggregator(ethUsdPriceFeed).updateAnswer(800e8);
+
+        // liquidation and assertion
+        uint256 userStartingHealthFactor= narcEngine.getHealthFactor(USER); //96e16
+        assertEq(userStartingHealthFactor, 96e16);
+        vm.expectRevert(abi.encodeWithSelector(NARStablecoinEngine.NAR_breaksHealthFactor.selector, 96e16));
+        narcEngine.liquidate(USER,1000e18,weth); // paying off the whole debt;
+        vm.stopPrank();
+    }
+
+
+
+
 
 
 }
